@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Chat Application Test UI</title>
+	<script>
+		async function sendMessage() {
+			const message = document.getElementById('message').value;
+			const response = await fetch('/api/send', {
+				method: 'POST',
+				headers: {'Content-Type': 'application/json'},
+				body: JSON.stringify({ content: message })
+			});
+			if(response.ok) {
+				document.getElementById('message').value = '';
+				loadMessages();
+			} else {
+				alert('Error sending message');
+			}
+		}
+
+		async function loadMessages() {
+			const response = await fetch('/api/messages');
+			if(response.ok) {
+				const messages = await response.json();
+				const messagesDiv = document.getElementById('messages');
+				messagesDiv.innerHTML = '';
+				messages.forEach(msg => {
+					const p = document.createElement('p');
+					p.textContent = msg;
+					messagesDiv.appendChild(p);
+				});
+			}
+		}
+
+		// Refresh messages every 2 seconds.
+		setInterval(loadMessages, 2000);
+	</script>
+</head>
+<body>
+	<h1>Chat Application Test UI</h1>
+	<div id="messages"></div>
+	<input type="text" id="message" placeholder="Type a message..." />
+	<button onclick="sendMessage()">Send</button>
+</body>
+</html>
+
