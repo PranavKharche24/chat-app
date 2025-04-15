@@ -9,9 +9,11 @@ import (
 	"io"
 )
 
+// NOTE: The key below is for demonstration only.
+// In production, do not hardcode keys—use a secure key management system.
 var key = []byte("01234567890123456789012345678901") // 32 bytes for AES-256
 
-// Encrypt takes a plaintext byte slice and returns a base64-encoded ciphertext.
+// Encrypt takes plaintext and returns a base64-encoded ciphertext.
 func Encrypt(plaintext []byte) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -54,4 +56,3 @@ func Decrypt(ciphertextBase64 string) (string, error) {
 	}
 	return string(plaintext), nil
 }
-
