@@ -8,12 +8,10 @@ import (
 )
 
 func main() {
-	// Initialize database file ("chatapp.db" in the current directory)
-	db, err := storage.NewDatabase("chatapp.db")
+	db, err := storage.NewDatabase("users.sqlite")
 	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		log.Fatal(err)
 	}
-	server := chat.NewChatServer(db)
-	// Start the TCP server on port 9000.
-	server.Start(":9000")
+	srv := chat.NewChatServer(db)
+	log.Fatal(srv.Start(":9000"))
 }

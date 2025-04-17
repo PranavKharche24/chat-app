@@ -3,254 +3,267 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"github.com/PranavKharche24/chat-app/internal/encryption"
 )
 
-// Global variables
-var conn net.Conn
-var app *tview.Application
-var pages *tview.Pages
-var chatView *tview.TextView
-var chatInput *tview.InputField
-var currentUser string
+const (
+	historyDir = "history"
+)
 
-// welcomeScreen creates the initial menu screen.
-func welcomeScreen() tview.Primitive {
-	header := tview.NewTextView().
-		SetTextAlign(tview.AlignCenter).
-		SetText("Welcome to ChatApp CLI\nPlease select an option below").
-		SetTextColor(tcell.ColorGreen)
+var (
+	conn          net.Conn
+	app           *tview.Application
+	pages         *tview.Pages
+	welcomeHeader *tview.TextView
+	chatView      *tview.TextView
+	partner       string
+)
 
-	menu := tview.NewList().
-		AddItem("Login", "Existing users log in", 'l', func() {
-			pages.SwitchToPage("login")
-		}).
-		AddItem("Register", "New user registration", 'r', func() {
-			pages.SwitchToPage("register")
-		}).
-		AddItem("Quit", "Exit application", 'q', func() {
-			app.Stop()
+// marquee animates the header.
+func marquee(txt string, tv *tview.TextView) {
+	pos := 0
+	for {
+		app.QueueUpdateDraw(func() {
+			tv.SetText(txt[pos:]+txt[:pos])
 		})
-
-	// Arrange header and menu vertically.
-	flex := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(header, 3, 1, false).
-		AddItem(menu, 0, 2, true)
-	return flex
+		pos = (pos + 1) % len(txt)
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
-// loginForm creates a form for logging in.
+// welcomeScreen with flashy UI.
+func welcomeScreen() tview.Primitive {
+	welcomeHeader = tview.NewTextView().
+		SetTextAlign(tview.AlignCenter).
+		SetTextColor(tcell.ColorYellow)
+	go marquee("✨  WELCOME TO SUPER‑CHAT ✨   ", welcomeHeader)
+
+	list := tview.NewList().
+		AddItem("Login", "", 'l', func() { pages.SwitchToPage("login") }).
+		AddItem("Register", "", 'r', func() { pages.SwitchToPage("register") }).
+		AddItem("Quit", "", 'q', func() { app.Stop() })
+
+	return tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(welcomeHeader, 3, 1, false).
+		AddItem(list, 0, 2, true)
+}
+
+// loginForm page.
 func loginForm() tview.Primitive {
-	form := tview.NewForm()
-	form.AddInputField("Username", "", 20, nil, nil)
-	form.AddPasswordField("Password", "", 20, '*', nil)
-	form.AddButton("Login", func() {
-		username := form.GetFormItemByLabel("Username").(*tview.InputField).GetText()
-		password := form.GetFormItemByLabel("Password").(*tview.InputField).GetText()
-		if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
-			modalError("Both username and password are required.")
+	f := tview.NewForm()
+	f.AddInputField("UserID", "", 10, nil, nil)
+	f.AddPasswordField("Password", "", 20, '*', nil)
+	f.AddButton("Login", func() {
+		uid := f.GetFormItemByLabel("UserID").(*tview.InputField).GetText()
+		pw := f.GetFormItemByLabel("Password").(*tview.InputField).GetText()
+		if uid == "" || pw == "" {
+			modal("ID & Password required", false)
 			return
 		}
-		// Send login command to server.
-		fmt.Fprintf(conn, "LOGIN %s %s\n", username, password)
+		fmt.Fprintf(conn, "LOGIN %s %s\n", uid, pw)
 	})
-	form.AddButton("Back", func() {
+	f.AddButton("Back", func() {
 		pages.SwitchToPage("welcome")
 	})
-	form.SetBorder(true).SetTitle(" Login ").SetTitleAlign(tview.AlignCenter)
-	return form
+
+	f.SetBorder(true).SetTitle(" Login ")
+	return f
 }
 
-// registerForm creates a form for user registration.
+// registerForm page.
 func registerForm() tview.Primitive {
-	form := tview.NewForm()
-	form.AddInputField("Username", "", 20, nil, nil)
-	form.AddPasswordField("Password", "", 20, '*', nil)
-	form.AddButton("Register", func() {
-		username := form.GetFormItemByLabel("Username").(*tview.InputField).GetText()
-		password := form.GetFormItemByLabel("Password").(*tview.InputField).GetText()
-		if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
-			modalError("Both username and password are required.")
+	f := tview.NewForm()
+	f.AddInputField("Username", "", 20, nil, nil)
+	f.AddInputField("Email", "", 30, nil, nil)
+	f.AddInputField("DOB (YYYY-MM-DD)", "", 10, nil, nil)
+	f.AddInputField("Full Name", "", 30, nil, nil)
+	f.AddPasswordField("Password", "", 20, '*', nil)
+	f.AddButton("Register", func() {
+		u := f.GetFormItemByLabel("Username").(*tview.InputField).GetText()
+		e := f.GetFormItemByLabel("Email").(*tview.InputField).GetText()
+		d := f.GetFormItemByLabel("DOB (YYYY-MM-DD)").(*tview.InputField).GetText()
+		n := f.GetFormItemByLabel("Full Name").(*tview.InputField).GetText()
+		p := f.GetFormItemByLabel("Password").(*tview.InputField).GetText()
+		if u == "" || e == "" || d == "" || n == "" || p == "" {
+			modal("All fields required", false)
 			return
 		}
-		// Send registration command to server.
-		fmt.Fprintf(conn, "REGISTER %s %s\n", username, password)
+		fmt.Fprintf(conn, "REGISTER %s %s %s %s %s\n", u, e, d, n, p)
 	})
-	form.AddButton("Back", func() {
+	f.AddButton("Back", func() {
 		pages.SwitchToPage("welcome")
 	})
-	form.SetBorder(true).SetTitle(" Register ").SetTitleAlign(tview.AlignCenter)
-	return form
+
+	f.SetBorder(true).SetTitle(" Register ")
+	return f
 }
 
-// chatScreen creates the main chat interface.
+// chatScreen page.
 func chatScreen() tview.Primitive {
-	// Chat view: displays messages.
 	chatView = tview.NewTextView().
 		SetDynamicColors(true).
-		SetWrap(true).
-		SetWordWrap(true).
-		SetChangedFunc(func() {
-			app.Draw() // Force redraw when new messages are added.
-		})
-	chatView.SetBorder(true).SetTitle(" Chat Room ")
+		SetWrap(true)
+	chatView.SetBorder(true).SetTitle(" Chat with: "+partner)
 
-	// Chat input: for sending messages.
-	chatInput = tview.NewInputField().
-		SetLabel("Enter message: ").
-		SetFieldWidth(0)
-	chatInput.SetDoneFunc(func(key tcell.Key) {
+	partnerInput := tview.NewInputField().
+		SetLabel("Partner username: ").
+		SetFieldWidth(20)
+	partnerInput.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
-			msg := chatInput.GetText()
-			chatInput.SetText("")
-			if strings.TrimSpace(msg) != "" {
-				// Send the message command.
-				fmt.Fprintf(conn, "MSG %s\n", msg)
+			p := partnerInput.GetText()
+			if p != "" {
+				partner = p
+				chatView.Clear()
+				loadHistory(p)
+				chatView.SetTitle(" Chat with: " + p)
 			}
 		}
 	})
-	chatInput.SetBorder(true)
 
-	// Status bar: provides quick hotkey instructions.
-	statusBar := tview.NewTextView().
-		SetDynamicColors(true).
-		SetText("[F2] History   [F3] Logout").
+	msgInput := tview.NewInputField().
+		SetLabel("Message: ").
+		SetFieldWidth(0)
+	msgInput.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEnter && partner != "" {
+			text := msgInput.GetText()
+			msgInput.SetText("")
+			fmt.Fprintf(conn, "SEND %s %s\n", partner, text)
+		}
+	})
+
+	status := tview.NewTextView().
+		SetText("[F2] Local History   [F3] Quit").
 		SetTextAlign(tview.AlignCenter)
 
-	// Arrange chat view, input field, and status bar in a vertical layout.
 	flex := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(partnerInput, 1, 0, true).
 		AddItem(chatView, 0, 1, false).
-		AddItem(chatInput, 3, 0, true).
-		AddItem(statusBar, 1, 0, false)
+		AddItem(msgInput, 1, 0, true).
+		AddItem(status, 1, 0, false)
 
-	// Global key bindings for history (F2) and logout (F3).
-	flex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
+	// Key bindings
+	flex.SetInputCapture(func(e *tcell.EventKey) *tcell.EventKey {
+		switch e.Key() {
 		case tcell.KeyF2:
-			// Send the HISTORY command to the server.
-			fmt.Fprintf(conn, "HISTORY\n")
+			showHistory(partner)
 			return nil
 		case tcell.KeyF3:
-			// Logout: clear username, clear chat view, send QUIT, and show welcome screen.
-			currentUser = ""
-			chatView.SetText("")
-			fmt.Fprintf(conn, "QUIT\n")
-			pages.SwitchToPage("welcome")
+			app.Stop()
 			return nil
 		}
-		return event
+		return e
 	})
 
 	return flex
 }
 
-// modalError displays an error modal with the specified message.
-func modalError(message string) {
-	modal := tview.NewModal().
-		SetText(message).
+// modal shows a message; if toChat, switch to chat on OK.
+func modal(text string, toChat bool) {
+	m := tview.NewModal().
+		SetText(text).
 		AddButtons([]string{"Ok"}).
-		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+		SetDoneFunc(func(_ int, _ string) {
 			pages.RemovePage("modal")
+			if toChat {
+				pages.SwitchToPage("chat")
+			}
 		})
-	pages.AddPage("modal", modal, true, true)
+	pages.AddPage("modal", m, true, true)
 }
 
-// readFromServer continuously reads from the TCP connection and updates the UI.
-func readFromServer() {
-	reader := bufio.NewScanner(conn)
-	for reader.Scan() {
-		line := reader.Text()
-		// Process broadcast chat messages (starting with "CHAT: ") or history entries (starting with "[").
-		if strings.HasPrefix(line, "CHAT: ") || strings.HasPrefix(line, "[") {
-			var decrypted string
-			if strings.HasPrefix(line, "CHAT: ") {
-				encryptedMsg := strings.TrimPrefix(line, "CHAT: ")
-				var err error
-				decrypted, err = encryption.Decrypt(encryptedMsg)
-				if err != nil {
-					decrypted = "[Error decrypting message]"
-				}
-			} else {
-				// Assume history or plain text messages are sent as-is.
-				decrypted = line
-			}
+// showHistory loads and displays local history for a partner.
+func showHistory(user string) {
+	data, err := ioutil.ReadFile(historyDir + "/" + user + ".txt")
+	if err != nil || len(data) == 0 {
+		data = []byte("No local history.")
+	}
+	m := tview.NewModal().
+		SetText(string(data)).
+		AddButtons([]string{"Ok"}).
+		SetDoneFunc(func(_ int, _ string) {
+			pages.RemovePage("hist")
+		})
+	pages.AddPage("hist", m, true, true)
+}
 
-			// If the message is in the expected history format "[username @ timestamp]: message"
-			// then highlight the username portion in yellow.
-			if strings.HasPrefix(decrypted, "[") {
-				endIdx := strings.Index(decrypted, "]")
-				if endIdx != -1 {
-					usernamePart := decrypted[1:endIdx]
-					// Format the message: username in yellow followed by the rest of the message.
-					decrypted = fmt.Sprintf("[yellow]%s[white]%s", usernamePart, decrypted[endIdx:])
-				}
-			}
+// loadHistory populates chatView from local file.
+func loadHistory(user string) {
+	file := historyDir + "/" + user + ".txt"
+	data, _ := ioutil.ReadFile(file)
+	fmt.Fprint(chatView, string(data))
+}
 
-			app.QueueUpdateDraw(func() {
-				fmt.Fprintf(chatView, "%s\n", decrypted)
-			})
-		} else {
-			// Process informational messages (login confirmations, errors, etc.).
-			if strings.Contains(line, "Login successful") {
-				parts := strings.Split(line, " ")
-				if len(parts) > 1 {
-					currentUser = parts[1]
-				}
-				app.QueueUpdateDraw(func() {
-					pages.SwitchToPage("chat")
-				})
+// storeLocal appends a message to the user’s local history.
+func storeLocal(user, msg string) {
+	if err := os.MkdirAll(historyDir, 0755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(historyDir+"/"+user+".txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		fmt.Fprintln(f, msg)
+		f.Close()
+	}
+}
+
+// reader pumps server messages into UI.
+func reader() {
+	sc := bufio.NewScanner(conn)
+	for sc.Scan() {
+		line := sc.Text()
+		switch {
+		case strings.HasPrefix(line, "REGISTERED"):
+			modal(line, false)
+		case line == "LOGIN OK":
+			modal("Login successful!", true)
+		case line == "SENT":
+			modal("Sent!", false)
+		case strings.HasPrefix(line, "ERROR"):
+			modal(line, false)
+		case strings.HasPrefix(line, "CHAT:"):
+			enc := strings.TrimPrefix(line, "CHAT:")
+			dec, err := encryption.Decrypt(enc)
+			if err != nil {
+				dec = "[decrypt error]"
 			}
+			// show + store
 			app.QueueUpdateDraw(func() {
-				modal := tview.NewModal().
-					SetText(line).
-					AddButtons([]string{"Ok"}).
-					SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-						pages.RemovePage("info")
-					})
-				pages.AddPage("info", modal, true, true)
+				fmt.Fprintln(chatView, dec)
 			})
+			storeLocal(partner, dec)
+		default:
+			// ignore or show generic
 		}
 	}
-	// When the connection closes, display a disconnect modal.
-	app.QueueUpdateDraw(func() {
-		modal := tview.NewModal().
-			SetText("Disconnected from server.").
-			AddButtons([]string{"Quit"}).
-			SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-				app.Stop()
-			})
-		pages.AddPage("disconnected", modal, true, true)
-	})
 }
 
 func main() {
 	var err error
-	// Establish connection to the chat server (adjust the address if needed).
 	conn, err = net.Dial("tcp", "localhost:9000")
 	if err != nil {
-		log.Fatalf("Unable to connect to server: %v", err)
+		log.Fatal(err)
 	}
 	defer conn.Close()
 
-	// Initialize the tview application and page container.
 	app = tview.NewApplication()
 	pages = tview.NewPages()
+
 	pages.AddPage("welcome", welcomeScreen(), true, true)
 	pages.AddPage("login", loginForm(), true, false)
 	pages.AddPage("register", registerForm(), true, false)
 	pages.AddPage("chat", chatScreen(), true, false)
 
-	// Start a goroutine to read incoming server messages.
-	go readFromServer()
+	go reader()
 
-	// Run the TUI application.
 	if err := app.SetRoot(pages, true).EnableMouse(true).Run(); err != nil {
-		log.Fatalf("Error running application: %v", err)
+		log.Fatal(err)
 	}
 }

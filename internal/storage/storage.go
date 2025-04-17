@@ -5,58 +5,55 @@ import (
 	"errors"
 
 	"golang.org/x/crypto/bcrypt"
-
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// Database wraps an SQLite connection.
-type Database struct {
-	db *sql.DB
-}
+type Database struct{ db *sql.DB }
 
-// NewDatabase opens (or creates) an SQLite database at the given filepath and creates tables if needed.
-func NewDatabase(filepath string) (*Database, error) {
-	db, err := sql.Open("sqlite3", filepath)
+// NewDatabase opens or creates the SQLite file and the users table.
+func NewDatabase(path string) (*Database, error) {
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, err
 	}
-	// Create users table
-	createUsers := `CREATE TABLE IF NOT EXISTS users (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		username TEXT UNIQUE NOT NULL,
-		password TEXT NOT NULL
-	);`
-	// Create messages table
-	createMessages := `CREATE TABLE IF NOT EXISTS messages (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		username TEXT,
-		content TEXT,
-		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-	);`
+	createUsers := `
+	CREATE TABLE IF NOT EXISTS users (
+	  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	  username   TEXT    UNIQUE NOT NULL,
+	  email      TEXT    UNIQUE NOT NULL,
+	  dob        TEXT    NOT NULL,
+	  full_name  TEXT    NOT NULL,
+	  hash       TEXT    NOT NULL
+	)`
 	if _, err := db.Exec(createUsers); err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(createMessages); err != nil {
-		return nil, err
-	}
-	return &Database{db: db}, nil
+	return &Database{db}, nil
 }
 
-// RegisterUser hashes the password and stores a new user.
-func (d *Database) RegisterUser(username, password string) error {
+// RegisterUser inserts a new user and returns their new userID.
+func (d *Database) RegisterUser(username, email, dob, fullName, password string) (int64, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = d.db.Exec("INSERT INTO users(username, password) VALUES(?,?)", username, string(hash))
-	return err
+	res, err := d.db.Exec(
+		`INSERT INTO users(username,email,dob,full_name,hash) VALUES(?,?,?,?,?)`,
+		username, email, dob, fullName, string(hash),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
-// AuthenticateUser checks if the provided password matches the stored hash.
-func (d *Database) AuthenticateUser(username, password string) error {
+// Authenticate checks a userID/password combo.
+func (d *Database) Authenticate(userID int64, password string) error {
 	var hash string
-	row := d.db.QueryRow("SELECT password FROM users WHERE username = ?", username)
-	if err := row.Scan(&hash); err != nil {
+	err := d.db.QueryRow(
+		`SELECT hash FROM users WHERE id = ?`, userID,
+	).Scan(&hash)
+	if err != nil {
 		return errors.New("user not found")
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
@@ -65,33 +62,26 @@ func (d *Database) AuthenticateUser(username, password string) error {
 	return nil
 }
 
-// Message represents a stored chat message.
-type Message struct {
-	Username  string
-	Content   string
-	Timestamp string
-}
-
-// StoreMessage saves a new message to the database.
-func (d *Database) StoreMessage(username, content string) error {
-	_, err := d.db.Exec("INSERT INTO messages(username, content) VALUES(?,?)", username, content)
-	return err
-}
-
-// GetMessages retrieves the latest 'limit' messages.
-func (d *Database) GetMessages(limit int) ([]Message, error) {
-	rows, err := d.db.Query("SELECT username, content, timestamp FROM messages ORDER BY timestamp DESC LIMIT ?", limit)
+// LookupByUsername returns the userID for a given username.
+func (d *Database) LookupByUsername(username string) (int64, error) {
+	var id int64
+	err := d.db.QueryRow(
+		`SELECT id FROM users WHERE username = ?`, username,
+	).Scan(&id)
 	if err != nil {
-		return nil, err
+		return 0, errors.New("user not found")
 	}
-	defer rows.Close()
-	var messages []Message
-	for rows.Next() {
-		var msg Message
-		if err := rows.Scan(&msg.Username, &msg.Content, &msg.Timestamp); err != nil {
-			continue
-		}
-		messages = append(messages, msg)
+	return id, nil
+}
+
+// LookupUsernameByID returns the username for a given userID.
+func (d *Database) LookupUsernameByID(userID int64) (string, error) {
+	var username string
+	err := d.db.QueryRow(
+		`SELECT username FROM users WHERE id = ?`, userID,
+	).Scan(&username)
+	if err != nil {
+		return "", errors.New("user not found")
 	}
-	return messages, nil
+	return username, nil
 }

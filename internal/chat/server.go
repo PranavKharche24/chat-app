@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -12,162 +13,132 @@ import (
 	"github.com/PranavKharche24/chat-app/internal/storage"
 )
 
-// Client holds data for a connected client.
 type Client struct {
-	conn     net.Conn
-	username string
-	out      chan string
+	conn   net.Conn
+	userID int64
+	out    chan string
 }
 
-// ChatServer holds the storage and connected clients.
 type ChatServer struct {
-	storage *storage.Database
-	clients map[net.Conn]*Client
-	mutex   sync.Mutex
+	db      *storage.Database
+	clients map[int64]*Client
+	mutex   sync.RWMutex
 }
 
-// NewChatServer creates a new ChatServer with an initialized storage backend.
 func NewChatServer(db *storage.Database) *ChatServer {
 	return &ChatServer{
-		storage: db,
-		clients: make(map[net.Conn]*Client),
+		db:      db,
+		clients: make(map[int64]*Client),
 	}
 }
 
-// Start begins listening on a TCP address and accepts incoming clients.
-func (cs *ChatServer) Start(addr string) {
-	listener, err := net.Listen("tcp", addr)
+func (s *ChatServer) Start(addr string) error {
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("Error starting TCP server: %v", err)
+		return err
 	}
-	defer listener.Close()
-	log.Printf("Chat server listening on %s", addr)
+	log.Printf("Listening on %s …", addr)
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Printf("Failed to accept connection: %v", err)
-			continue
-		}
-		client := &Client{
-			conn: conn,
-			out:  make(chan string),
-		}
-		cs.mutex.Lock()
-		cs.clients[conn] = client
-		cs.mutex.Unlock()
-		go cs.handleClient(client)
-		go cs.writeToClient(client)
+		conn, _ := ln.Accept()
+		go s.handleConn(conn)
 	}
 }
 
-// broadcastMessage encrypts and sends a chat message to all clients.
-func (cs *ChatServer) broadcastMessage(sender string, message string) {
-	fullMsg := fmt.Sprintf("[%s]: %s", sender, message)
-	encrypted, err := encryption.Encrypt([]byte(fullMsg))
-	if err != nil {
-		log.Printf("Encryption error: %v", err)
-		return
-	}
-	broadcast := "CHAT: " + encrypted
-	cs.mutex.Lock()
-	defer cs.mutex.Unlock()
-	for _, client := range cs.clients {
-		client.out <- broadcast
-	}
-}
-
-// handleClient processes commands from a single client.
-func (cs *ChatServer) handleClient(client *Client) {
-	defer func() {
-		cs.mutex.Lock()
-		delete(cs.clients, client.conn)
-		cs.mutex.Unlock()
-		client.conn.Close()
+func (s *ChatServer) handleConn(conn net.Conn) {
+	c := &Client{conn: conn, out: make(chan string, 10)}
+	defer conn.Close()
+	go func() {
+		for msg := range c.out {
+			conn.Write([]byte(msg + "\n"))
+		}
 	}()
-	// Send a welcome message.
-	client.out <- "Welcome to ChatApp CLI.\nAvailable commands:\n  REGISTER username password\n  LOGIN username password\n  MSG message\n  HISTORY\n  QUIT"
-	scanner := bufio.NewScanner(client.conn)
+
+	// Welcome & commands
+	c.out <- "🌟 Welcome to Super‑Chat! 🌟"
+	c.out <- "Commands:"
+	c.out <- "  REGISTER username email dob(YYYY-MM-DD) fullname password"
+	c.out <- "  LOGIN userID password"
+	c.out <- "  SEND username message…"
+	c.out <- "  QUIT"
+
+	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.SplitN(line, " ", 2)
-		command := strings.ToUpper(strings.TrimSpace(parts[0]))
-		var args string
+		cmd := strings.ToUpper(parts[0])
+		arg := ""
 		if len(parts) > 1 {
-			args = strings.TrimSpace(parts[1])
+			arg = parts[1]
 		}
-		switch command {
-		case "REGISTER":
-			// Expect: REGISTER username password
-			argsParts := strings.SplitN(args, " ", 2)
-			if len(argsParts) < 2 {
-				client.out <- "Usage: REGISTER username password"
-				continue
-			}
-			username := strings.TrimSpace(argsParts[0])
-			password := strings.TrimSpace(argsParts[1])
-			if err := cs.storage.RegisterUser(username, password); err != nil {
-				client.out <- fmt.Sprintf("Registration failed: %v", err)
-			} else {
-				client.out <- "Registration successful. Please LOGIN with your credentials."
-			}
-		case "LOGIN":
-			// Expect: LOGIN username password
-			argsParts := strings.SplitN(args, " ", 2)
-			if len(argsParts) < 2 {
-				client.out <- "Usage: LOGIN username password"
-				continue
-			}
-			username := strings.TrimSpace(argsParts[0])
-			password := strings.TrimSpace(argsParts[1])
-			if err := cs.storage.AuthenticateUser(username, password); err != nil {
-				client.out <- fmt.Sprintf("Login failed: %v", err)
-			} else {
-				client.username = username
-				client.out <- "Login successful. You can now send messages using the MSG command."
-			}
-		case "MSG":
-			if client.username == "" {
-				client.out <- "You must login first."
-				continue
-			}
-			if args == "" {
-				client.out <- "Usage: MSG your message here"
-				continue
-			}
-			// Save message to DB.
-			if err := cs.storage.StoreMessage(client.username, args); err != nil {
-				client.out <- fmt.Sprintf("Failed to store message: %v", err)
-			}
-			cs.broadcastMessage(client.username, args)
-		case "HISTORY":
-			messages, err := cs.storage.GetMessages(10)
-			if err != nil {
-				client.out <- fmt.Sprintf("Failed to fetch history: %v", err)
-			} else {
-				// Display from oldest to newest.
-				for i := len(messages) - 1; i >= 0; i-- {
-					msg := messages[i]
-					client.out <- fmt.Sprintf("[%s @ %s]: %s", msg.Username, msg.Timestamp, msg.Content)
-				}
-			}
-		case "QUIT":
-			client.out <- "Goodbye!"
-			return
-		default:
-			client.out <- "Unknown command. Options: REGISTER, LOGIN, MSG, HISTORY, QUIT"
-		}
-	}
-}
 
-// writeToClient continuously writes queued messages to the client connection.
-func (cs *ChatServer) writeToClient(client *Client) {
-	writer := bufio.NewWriter(client.conn)
-	for msg := range client.out {
-		_, err := writer.WriteString(msg + "\n")
-		if err != nil {
-			log.Printf("Error writing to client: %v", err)
+		switch cmd {
+		case "REGISTER":
+			f := strings.SplitN(arg, " ", 5)
+			if len(f) < 5 {
+				c.out <- "Usage: REGISTER username email dob fullname password"
+				continue
+			}
+			uid, err := s.db.RegisterUser(f[0], f[1], f[2], f[3], f[4])
+			if err != nil {
+				c.out <- "ERROR: " + err.Error()
+			} else {
+				c.out <- fmt.Sprintf("REGISTERED userID=%d", uid)
+			}
+
+		case "LOGIN":
+			f := strings.SplitN(arg, " ", 2)
+			if len(f) < 2 {
+				c.out <- "Usage: LOGIN userID password"
+				continue
+			}
+			uid, err := strconv.ParseInt(f[0], 10, 64)
+			if err != nil {
+				c.out <- "ERROR: invalid userID"
+				continue
+			}
+			if err := s.db.Authenticate(uid, f[1]); err != nil {
+				c.out <- "ERROR: " + err.Error()
+			} else {
+				c.userID = uid
+				s.mutex.Lock()
+				s.clients[uid] = c
+				s.mutex.Unlock()
+				c.out <- "LOGIN OK"
+			}
+
+		case "SEND":
+			if c.userID == 0 {
+				c.out <- "ERROR: please LOGIN first"
+				continue
+			}
+			f := strings.SplitN(arg, " ", 2)
+			if len(f) < 2 {
+				c.out <- "Usage: SEND username message"
+				continue
+			}
+			toID, err := s.db.LookupByUsername(f[0])
+			if err != nil {
+				c.out <- "ERROR: user not found"
+				continue
+			}
+			s.mutex.RLock()
+			dest, online := s.clients[toID]
+			s.mutex.RUnlock()
+			// Format message with sender’s username
+			sender, _ := s.db.LookupUsernameByID(c.userID)
+			full := fmt.Sprintf("[%s] %s", sender, f[1])
+			enc, _ := encryption.Encrypt([]byte(full))
+			if online {
+				dest.out <- "CHAT:" + enc
+			}
+			c.out <- "SENT"
+
+		case "QUIT":
+			c.out <- "BYE"
 			return
+
+		default:
+			c.out <- "Unknown command"
 		}
-		writer.Flush()
 	}
 }
