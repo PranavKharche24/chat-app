@@ -5,39 +5,41 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/PranavKharche24/chat-app/internal/chat/groups"
 	"github.com/PranavKharche24/chat-app/internal/encryption"
 	"github.com/PranavKharche24/chat-app/internal/storage"
 )
 
 type Client struct {
 	conn   net.Conn
-	userID int64
+	userID string
 	out    chan string
 }
 
 type ChatServer struct {
 	db      *storage.Database
-	clients map[int64]*Client
+	gm      *groups.Manager
+	clients map[string]*Client
 	mutex   sync.RWMutex
 }
 
 func NewChatServer(db *storage.Database) *ChatServer {
 	return &ChatServer{
 		db:      db,
-		clients: make(map[int64]*Client),
+		gm:      groups.NewManager(),
+		clients: make(map[string]*Client),
 	}
 }
 
-func (s *ChatServer) Start(addr string) error {
+func (s *ChatServer) Start(addr string) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return err
+		log.Fatalf("listen error: %v", err)
 	}
-	log.Printf("Listening on %s …", addr)
+	log.Printf("Server listening on %s", addr)
 	for {
 		conn, _ := ln.Accept()
 		go s.handleConn(conn)
@@ -53,13 +55,18 @@ func (s *ChatServer) handleConn(conn net.Conn) {
 		}
 	}()
 
-	// Welcome & commands
-	c.out <- "🌟 Welcome to Super‑Chat! 🌟"
-	c.out <- "Commands:"
-	c.out <- "  REGISTER username email dob(YYYY-MM-DD) fullname password"
-	c.out <- "  LOGIN userID password"
-	c.out <- "  SEND username message…"
-	c.out <- "  QUIT"
+	// Command list
+	c.out <- "✨ Super‑Chat Server ✨"
+	c.out <- "REGISTER username email dob full_name password"
+	c.out <- "LOGIN userID password"
+	c.out <- "SEND username message"
+	c.out <- "SENDALL message"
+	c.out <- "CREATEGROUP name"
+	c.out <- "JOINGROUP name"
+	c.out <- "LEAVEGROUP name"
+	c.out <- "SENDGROUP name message"
+	c.out <- "SETTINGS"
+	c.out <- "QUIT"
 
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
@@ -75,14 +82,14 @@ func (s *ChatServer) handleConn(conn net.Conn) {
 		case "REGISTER":
 			f := strings.SplitN(arg, " ", 5)
 			if len(f) < 5 {
-				c.out <- "Usage: REGISTER username email dob fullname password"
+				c.out <- "Usage: REGISTER username email dob full_name password"
 				continue
 			}
-			uid, err := s.db.RegisterUser(f[0], f[1], f[2], f[3], f[4])
+			id, err := s.db.RegisterUser(f[0], f[1], f[2], f[3], f[4])
 			if err != nil {
 				c.out <- "ERROR: " + err.Error()
 			} else {
-				c.out <- fmt.Sprintf("REGISTERED userID=%d", uid)
+				c.out <- "REGISTERED:" + id
 			}
 
 		case "LOGIN":
@@ -91,24 +98,19 @@ func (s *ChatServer) handleConn(conn net.Conn) {
 				c.out <- "Usage: LOGIN userID password"
 				continue
 			}
-			uid, err := strconv.ParseInt(f[0], 10, 64)
-			if err != nil {
-				c.out <- "ERROR: invalid userID"
+			if err := s.db.Authenticate(f[0], f[1]); err != nil {
+				c.out <- "ERROR: " + err.Error()
 				continue
 			}
-			if err := s.db.Authenticate(uid, f[1]); err != nil {
-				c.out <- "ERROR: " + err.Error()
-			} else {
-				c.userID = uid
-				s.mutex.Lock()
-				s.clients[uid] = c
-				s.mutex.Unlock()
-				c.out <- "LOGIN OK"
-			}
+			c.userID = f[0]
+			s.mutex.Lock()
+			s.clients[c.userID] = c
+			s.mutex.Unlock()
+			c.out <- "LOGIN OK"
 
 		case "SEND":
-			if c.userID == 0 {
-				c.out <- "ERROR: please LOGIN first"
+			if c.userID == "" {
+				c.out <- "ERROR: login first"
 				continue
 			}
 			f := strings.SplitN(arg, " ", 2)
@@ -121,17 +123,81 @@ func (s *ChatServer) handleConn(conn net.Conn) {
 				c.out <- "ERROR: user not found"
 				continue
 			}
-			s.mutex.RLock()
-			dest, online := s.clients[toID]
-			s.mutex.RUnlock()
-			// Format message with sender’s username
-			sender, _ := s.db.LookupUsernameByID(c.userID)
-			full := fmt.Sprintf("[%s] %s", sender, f[1])
+			full := fmt.Sprintf("[%s] %s", c.userID, f[1])
 			enc, _ := encryption.Encrypt([]byte(full))
-			if online {
+			s.mutex.RLock()
+			if dest, ok := s.clients[toID]; ok {
 				dest.out <- "CHAT:" + enc
 			}
+			s.mutex.RUnlock()
 			c.out <- "SENT"
+
+		case "SENDALL":
+			if c.userID == "" {
+				c.out <- "ERROR: login first"
+				continue
+			}
+			full := fmt.Sprintf("[ALL][%s] %s", c.userID, arg)
+			enc, _ := encryption.Encrypt([]byte(full))
+			s.mutex.RLock()
+			for id, client := range s.clients {
+				if id != c.userID {
+					client.out <- "CHAT:" + enc
+				}
+			}
+			s.mutex.RUnlock()
+			c.out <- "SENT"
+
+		case "CREATEGROUP":
+			if err := s.gm.CreateGroup(arg); err != nil {
+				c.out <- "ERROR: " + err.Error()
+			} else {
+				c.out <- "GROUPCREATED:" + arg
+			}
+
+		case "JOINGROUP":
+			if err := s.gm.AddMember(arg, c.userID); err != nil {
+				c.out <- "ERROR: " + err.Error()
+			} else {
+				c.out <- "JOINEDGROUP:" + arg
+			}
+
+		case "LEAVEGROUP":
+			if err := s.gm.RemoveMember(arg, c.userID); err != nil {
+				c.out <- "ERROR: " + err.Error()
+			} else {
+				c.out <- "LEFTGROUP:" + arg
+			}
+
+		case "SENDGROUP":
+			f := strings.SplitN(arg, " ", 2)
+			if len(f) < 2 {
+				c.out <- "Usage: SENDGROUP name message"
+				continue
+			}
+			members, err := s.gm.Members(f[0])
+			if err != nil {
+				c.out <- "ERROR: " + err.Error()
+				continue
+			}
+			full := fmt.Sprintf("[Group:%s][%s] %s", f[0], c.userID, f[1])
+			enc, _ := encryption.Encrypt([]byte(full))
+			s.mutex.RLock()
+			for _, uid := range members {
+				if dest, ok := s.clients[uid]; ok && uid != c.userID {
+					dest.out <- "CHAT:" + enc
+				}
+			}
+			s.mutex.RUnlock()
+			c.out <- "SENTGROUP"
+
+		case "SETTINGS":
+			u, e, d, fn, err := s.db.GetProfile(c.userID)
+			if err != nil {
+				c.out <- "ERROR: " + err.Error()
+			} else {
+				c.out <- fmt.Sprintf("PROFILE:%s:%s:%s:%s", u, e, d, fn)
+			}
 
 		case "QUIT":
 			c.out <- "BYE"
